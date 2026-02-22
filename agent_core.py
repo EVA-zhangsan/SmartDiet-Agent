@@ -4,6 +4,8 @@ from typing import Any
 import django
 import openai
 from django.apps import apps as django_apps
+from django.core.management import call_command
+from django.db.utils import OperationalError
 from openai import OpenAI
 
 # ==========================================
@@ -56,10 +58,83 @@ def _normalize_messages(messages_history: list[dict[str, Any]]) -> list[dict[str
 
 def ask_smartdiet_agent(messages_history: list[dict[str, Any]], user_profile: str = "") -> str:
     """SmartDiet-Agent 的核心处理逻辑（支持多轮对话 + 用户画像注入）。"""
-    recipes = Recipe.objects.all()
+    # 1) 自动建表：云端首次启动常见 db.sqlite3 不存在（被 .gitignore 拦截）导致表未创建
+    try:
+        recipes = Recipe.objects.all()
+        recipe_count = recipes.count()
+    except OperationalError:
+        call_command("migrate", interactive=False, run_syncdb=True, verbosity=0)
+        recipes = Recipe.objects.all()
+        recipe_count = recipes.count()
 
-    if not recipes:
-        return "数据库里还没有食谱哦，请先去 Django 后台录入几个测试数据！"
+    # 2) 自动塞入初始数据（Seeding）：确保云端首次打开就可用
+    if recipe_count == 0:
+        seed_items = [
+            {
+                "name": "泰式青柠煎鸡胸",
+                "calories": 350,
+                "protein": 40.0,
+                "carbs": 15.0,
+                "fats": 10.0,
+                "ingredients": "鸡胸肉 200g、青柠 1 个、蒜 2 瓣、黑胡椒、少量橄榄油、盐、辣椒粉（可选）",
+                "instructions": "1) 鸡胸肉拍松，加入青柠汁、蒜末、盐和黑胡椒腌 10-15 分钟；2) 平底锅少油中火煎至两面金黄、熟透；3) 出锅再挤少量青柠汁提味。",
+            },
+            {
+                "name": "意式番茄牛肉全麦面",
+                "calories": 550,
+                "protein": 35.0,
+                "carbs": 60.0,
+                "fats": 15.0,
+                "ingredients": "全麦意面 80g（干重）、瘦牛肉末 150g、番茄/番茄罐头、洋葱、蒜、橄榄油、盐、黑胡椒、意式香草",
+                "instructions": "1) 意面煮至 8 分熟；2) 少油炒香洋葱蒜末，下牛肉末炒散；3) 加番茄与香草小火收汁；4) 与意面拌匀即可。",
+            },
+            {
+                "name": "藜麦大虾牛油果沙拉",
+                "calories": 420,
+                "protein": 25.0,
+                "carbs": 30.0,
+                "fats": 20.0,
+                "ingredients": "藜麦 60g（熟）、虾仁 150g、牛油果 1/2 个、生菜/黄瓜/小番茄、柠檬汁、盐、黑胡椒",
+                "instructions": "1) 虾仁焯水或快炒至变色；2) 藜麦提前煮熟放凉；3) 与蔬菜、牛油果混合；4) 用柠檬汁+盐+黑胡椒简单调味。",
+            },
+            {
+                "name": "迷迭香烤三文鱼配时蔬",
+                "calories": 600,
+                "protein": 45.0,
+                "carbs": 45.0,
+                "fats": 25.0,
+                "ingredients": "三文鱼 200g、迷迭香、柠檬、盐、黑胡椒、橄榄油、时蔬（西兰花/胡萝卜/彩椒）、小土豆（可选）",
+                "instructions": "1) 三文鱼抹盐胡椒与迷迭香，铺柠檬片；2) 烤箱 200°C 烤 12-15 分钟；3) 时蔬同盘烤或蒸熟，少量橄榄油调味。",
+            },
+            {
+                "name": "经典燕麦牛奶蓝莓碗",
+                "calories": 300,
+                "protein": 15.0,
+                "carbs": 45.0,
+                "fats": 6.0,
+                "ingredients": "燕麦 40g、牛奶/无糖豆奶 200ml、蓝莓一小把、奇亚籽/坚果（可选）、肉桂粉（可选）",
+                "instructions": "1) 燕麦与牛奶小火煮至浓稠；2) 盛出后加入蓝莓；3) 可按需撒奇亚籽/少量坚果提升口感与饱腹感。",
+            },
+        ]
+
+        for item in seed_items:
+            Recipe.objects.get_or_create(
+                name=item["name"],
+                defaults={
+                    "calories": item["calories"],
+                    "protein": item["protein"],
+                    "carbs": item["carbs"],
+                    "fats": item["fats"],
+                    "ingredients": item["ingredients"],
+                    "instructions": item["instructions"],
+                },
+            )
+
+        recipes = Recipe.objects.all()
+
+    # 3) 继续向下执行
+    if not recipes.exists():
+        return "数据库里还没有食谱哦，请先生成/录入一些食谱数据再试。"
 
     recipe_context = "【当前系统可用的食谱库】：\n"
     for r in recipes:
